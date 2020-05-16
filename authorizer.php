@@ -87,13 +87,13 @@ class JWTAuthVerifier
             }
 
             $cookieUserName = isset($_COOKIE[self::USER_NAME_COOKIE]) ? trim($_COOKIE[self::USER_NAME_COOKIE], '"') : "";
-            
+            $this->email = $this->token->getClaim("email");
+
 			if ($cookieUserName != "") {
 				$this->userName = $cookieUserName;
 			} else {
-				$email = $this->token->getClaim("email");
-				if (!is_null($email) && $email != "") {
-					$this->userName = $email;
+				if (!is_null($this->email) && $this->email != "") {
+					$this->userName = $this->email;
 				}
 			}
 		}
@@ -299,6 +299,24 @@ class JWTAuthVerifier
         if (is_null($iss) || $iss == "") {
             self::fail("no iss (issuer) claim in the token");
             return false;
+        }
+
+        // parse domain part from the issuer
+        $issDomain = $iss;
+        if (substr($issDomain, 0, 4) == "http") {
+            $u = parse_url($iss);
+            if (is_null($u) || $u === false) {
+                self::fail("iss claim (issuer) is not valid URL: $iss");
+                return;
+            }
+            
+            $issDomain = $u["host"];
+        }
+
+        // ensure the issuer is whitelisted
+        if (!isset($issDomain) || $issDomain=="" || !in_array($u["host"], $this->allowedIssuerDomains)) {
+            self::fail("issuer domain $issDomain is not allowed");
+            return;
         }
 
         $headers = $this->token->getHeaders();
