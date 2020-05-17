@@ -26,8 +26,10 @@ class JWTAuthVerifier
     const USER_NAME_COOKIE = "_admin_auth_user_name";
     const TOKEN_HEADER_NAME = "Authorization";
     const JWKS_CACHE_TTL = 60; // 0 to disable
+    const SIG_ALG = "sha256"; // signature for cache hmac
 
     private $allowedIssuerDomains;
+    private $cacheAuthKey = null;
 	private $tokenVerified = false;
 	private $groups = null;
 
@@ -41,11 +43,20 @@ class JWTAuthVerifier
     /**
      * Constructor
      * @param array $allowedIssuers list of allowed issuer domains (domain part of iss claim), e.g. auth.domain.com
+     * @param string $cacheAuthKey authentication key used for signing and verifying the JWKS cache
      * @param string $jwtInput (optional) JWT input string to verify (will use Authentication header if not provided)
      */
-    public function __construct($allowedIssuerDomains, $jwtInput = null)
+    public function __construct($allowedIssuerDomains, $cacheAuthKey, $jwtInput = null)
     {
-        if (is_null($jwtInput) || strlen($jwtInput) == 0) {
+        $this->cacheAuthKey = $cacheAuthKey;
+        $this->allowedIssuerDomains = $allowedIssuerDomains;
+
+        if (self::JWKS_CACHE_TTL > 0 && (!isset($cacheAuthKey) || $cacheAuthKey == "")) {
+            self::fail("cacheAuthKey must be set");
+            return;
+        }
+
+        if (!isset($jwtInput) || strlen($jwtInput) == 0) {
             $heads = getallheaders();
             if ($heads === false) {
                 self::fail("unable to get request headers and no token provided directly");
@@ -71,8 +82,6 @@ class JWTAuthVerifier
                 }
             }
         }
-
-        $this->allowedIssuerDomains = $allowedIssuerDomains;
 
         if (strlen($jwtInput) > 0) {
             try {
@@ -219,11 +228,103 @@ class JWTAuthVerifier
         return false;
     }
 
+    /** 
+     * Returns path to cache file for the issuer
+     */
+    private static function cachePathForIssuer($iss)
+    {
+        return sys_get_temp_dir() . "/" . hash("md5", $iss);
+    }
+
+    /**
+     * Attempts to load cached issuer object from the cache.
+     * Returns FALSE if the cache does not exist or is invalid. 
+     */
+    private function loadFromCache($iss) {
+        $cachePath = self::cachePathForIssuer($iss);
+
+        if (!file_exists($cachePath)) {
+            // does not exist
+            return false;
+        }
+
+        $data = file_get_contents($cachePath);
+        if (!isset($data) || $data === false) {
+            // unable to read
+            return false;
+        }
+
+        // parse the header from the first line (format: ver|signature)
+        $line_end = strpos($data, "\n");
+        if ($line_end === false) {
+            // line ending character not found
+            return false;
+        }
+        $line = substr($data, 0, $line_end);
+        $data = substr($data, $line_end+1);
+        $head = explode("|", $line);
+        if (count($head) < 2 || $head[0] != 1) {
+            // invalid header or bad version
+            return false;
+        }
+        $sig = $head[1];
+
+        // verify signature
+        $expectedSig = hash_hmac(self::SIG_ALG, $data, $this->cacheAuthKey);
+
+        if ($expectedSig != $sig) {
+            // bad signature
+            return false;
+        }
+
+        $j = json_decode($data, true);
+        if (!isset($j) || $j === false || !isset($j["ts"])) {
+            // unable to jsondecode or object doesn't contain ts key
+            return false;
+        }
+
+        $age = time() - $j["ts"];
+        if ($age >= self::JWKS_CACHE_TTL) {
+            // too old
+            return false;
+        }
+
+        return $j;
+    }
+
+    /**
+     * Attempts to store object to the cache
+     * Returns FALSE if there was an error saving the object
+     */
+    private function storeToCache($iss, $obj)
+    {
+        if (!isset($obj) || $obj === false) {
+            return false;
+        }
+
+        $data = json_encode($obj);
+        if ($data === false) {
+            // unable to encode
+            return false;
+        }
+
+        $sig = hash_hmac(self::SIG_ALG, $data, $this->cacheAuthKey);
+        if ($sig === false) {
+            // unable to hmac
+            return false;
+        }
+
+        $data = "1|" . $sig . "\n" . $data;
+
+        $cachePath = self::cachePathForIssuer($iss);
+        return file_put_contents($cachePath, $data) !== false;
+    }
+
     /**
      * Gets the PEM-formatted key $kid from the OIDC provider URL $iss.
      * Cache may be used (if configured) to avoid downloading the key for every request.
      */
-    private static function getPemKeyFromIssuer($iss, $kid)
+    private function getPemKeyFromIssuer($iss, $kid)
     {
         $cachePath = "";
 
@@ -232,22 +333,13 @@ class JWTAuthVerifier
         }
 
         if (self::JWKS_CACHE_TTL > 0) {
-            $cachePath = sys_get_temp_dir() . "/" . hash("md5", $iss);
-            if (file_exists($cachePath)) {
-                $j = json_decode(file_get_contents($cachePath), true);
-
-                // if cache file decoded ok..
-                if ($j !== false && !is_null($j) && isset($j["ts"])) {
-                    $age = time() - $j["ts"];
-                    // and cache is not too old
-                    if ($age < self::JWKS_CACHE_TTL) {
-                        $pem = self::getPemKeyFromKeys($kid, $j["keys"]);
-                        // and pem key can be get
-                        if (isset($pem) && $pem != "") {
-                            // return key from the cache
-                            return $pem;
-                        }
-                    }
+            $j = $this->loadFromCache($iss);
+            if (isset($j) && $j !== false) {
+                $pem = self::getPemKeyFromKeys($kid, $j["keys"]);
+                // and pem key can be get
+                if (isset($pem) && $pem != "") {
+                    // return key from the cache
+                    return $pem;
                 }
             }
         }
@@ -271,9 +363,7 @@ class JWTAuthVerifier
                 "ts" => time(),
             ];
             
-            $jstr = json_encode($obj);
-
-            file_put_contents($cachePath, $jstr);
+            $this->storeToCache($iss, $obj);
         }
         
         return $pem;
@@ -337,7 +427,7 @@ class JWTAuthVerifier
             return false;
         }
 
-        $pemPublicKey = self::getPemKeyFromIssuer($iss, $kid);
+        $pemPublicKey = $this->getPemKeyFromIssuer($iss, $kid);
         if ($pemPublicKey === false) {
             self::fail("issuer $iss doesn't provide key $kid");
             return false;

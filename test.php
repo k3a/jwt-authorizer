@@ -8,7 +8,7 @@ print_r(getallheaders());
 
 //htmlspecialchars($_COOKIE["name"])
 
-$jav = new JWTAuthVerifier(["admin-auth.ndemiccreations.com"]);
+$jav = new JWTAuthVerifier(["admin-auth.ndemiccreations.com"], "some-key");
 
 $user_name = $jav->userName;
 echo "User Name: $user_name\n";
