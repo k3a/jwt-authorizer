@@ -25,11 +25,12 @@ class JWTAuthVerifier
 {
     const USER_NAME_COOKIE = "_admin_auth_user_name";
     const TOKEN_HEADER_NAME = "Authorization";
-    const JWKS_CACHE_TTL = 60; // 0 to disable
-    const SIG_ALG = "sha256"; // signature for cache hmac
+    const JWKS_CACHE_TTL = 60; // JWKS cache time-to-live (0 to disable)
+    const JWKS_CACHE_ENC_ALG = "aes-128-gcm"; // encryption alg for cache
+    const JWKS_KEY_LEN_BITS = 128;
 
     private $allowedIssuerDomains;
-    private $cacheAuthKey = null;
+    private $cacheKey = null;
 	private $tokenVerified = false;
 	private $groups = null;
 
@@ -43,17 +44,19 @@ class JWTAuthVerifier
     /**
      * Constructor
      * @param array $allowedIssuers list of allowed issuer domains (domain part of iss claim), e.g. auth.domain.com
-     * @param string $cacheAuthKey authentication key used for signing and verifying the JWKS cache
+     * @param string $cacheKey key used for encryption of JWKS cache
      * @param string $jwtInput (optional) JWT input string to verify (will use Authentication header if not provided)
      */
-    public function __construct($allowedIssuerDomains, $cacheAuthKey, $jwtInput = null)
+    public function __construct($allowedIssuerDomains, $cacheKey, $jwtInput = null)
     {
-        $this->cacheAuthKey = $cacheAuthKey;
         $this->allowedIssuerDomains = $allowedIssuerDomains;
 
-        if (self::JWKS_CACHE_TTL > 0 && (!isset($cacheAuthKey) || $cacheAuthKey == "")) {
-            self::fail("cacheAuthKey must be set");
-            return;
+        if (self::JWKS_CACHE_TTL > 0) {
+            if (!isset($cacheKey) || $cacheKey == "") {
+                self::fail("cacheKey must be set");
+                return;
+            }
+            //$this->cacheKey = substr(hash("sha256", $cacheKey), 0, self::JWKS_KEY_LEN_BITS/8);
         }
 
         if (!isset($jwtInput) || strlen($jwtInput) == 0) {
@@ -231,9 +234,9 @@ class JWTAuthVerifier
     /** 
      * Returns path to cache file for the issuer
      */
-    private static function cachePathForIssuer($iss)
+    private function cachePathForIssuer($iss)
     {
-        return sys_get_temp_dir() . "/" . hash("md5", $iss);
+        return sys_get_temp_dir() . "/" . hash("md5", $iss . crc32($this->cacheKey));
     }
 
     /**
@@ -241,7 +244,7 @@ class JWTAuthVerifier
      * Returns FALSE if the cache does not exist or is invalid. 
      */
     private function loadFromCache($iss) {
-        $cachePath = self::cachePathForIssuer($iss);
+        $cachePath = $this->cachePathForIssuer($iss);
 
         if (!file_exists($cachePath)) {
             // does not exist
@@ -254,26 +257,27 @@ class JWTAuthVerifier
             return false;
         }
 
-        // parse the header from the first line (format: ver|signature)
-        $line_end = strpos($data, "\n");
-        if ($line_end === false) {
-            // line ending character not found
+        $ivlen = openssl_cipher_iv_length(self::JWKS_CACHE_ENC_ALG);
+        if (strlen($data) <= $ivlen) {
+            // input too short
             return false;
         }
-        $line = substr($data, 0, $line_end);
-        $data = substr($data, $line_end+1);
-        $head = explode("|", $line);
-        if (count($head) < 2 || $head[0] != 1) {
-            // invalid header or bad version
+
+        // extract iv
+        $iv = substr($data, 0, $ivlen);
+        $data = substr($data, $ivlen);
+
+        // extract tag
+        $taglen = ord($data[0]);
+        if (strlen($data) < $taglen) {
+            // input too short
             return false;
         }
-        $sig = $head[1];
-
-        // verify signature
-        $expectedSig = hash_hmac(self::SIG_ALG, $data, $this->cacheAuthKey);
-
-        if ($expectedSig != $sig) {
-            // bad signature
+        $tag = substr($data, 1, $taglen);
+        $data = substr($data, 1 + $taglen);
+        $data = openssl_decrypt($data, self::JWKS_CACHE_ENC_ALG, $this->cacheKey, OPENSSL_RAW_DATA, $iv, $tag);
+        if (is_null($data) || $data === false) {
+            // bad data or unable to decrypt
             return false;
         }
 
@@ -308,15 +312,18 @@ class JWTAuthVerifier
             return false;
         }
 
-        $sig = hash_hmac(self::SIG_ALG, $data, $this->cacheAuthKey);
-        if ($sig === false) {
-            // unable to hmac
+        $ivlen = openssl_cipher_iv_length(self::JWKS_CACHE_ENC_ALG);
+        $iv = openssl_random_pseudo_bytes($ivlen);
+        $tag = null;
+        $data = openssl_encrypt($data, self::JWKS_CACHE_ENC_ALG, $this->cacheKey, OPENSSL_RAW_DATA, $iv, $tag);
+        if (is_null($data) || $data === false) {
+            // unable to encrypt
             return false;
         }
+        // pre-pend iv, tag length and tag in front of data
+        $data = $iv . chr(strlen($tag)) . $tag . $data;
 
-        $data = "1|" . $sig . "\n" . $data;
-
-        $cachePath = self::cachePathForIssuer($iss);
+        $cachePath = $this->cachePathForIssuer($iss);
         return file_put_contents($cachePath, $data) !== false;
     }
 
