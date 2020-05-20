@@ -162,17 +162,62 @@ class JWTAuthVerifier
     }
 
     /**
+     * Makes a GET request and returns the response contents or FALSE in case of an error.
+     */
+    private static function fetchFromURL($url, $timeout = 10)
+    {
+        if (!in_array('curl', get_loaded_extensions())) {
+            $ctx = stream_context_create(['http'=> [
+                        'timeout' => $timeout,
+                    ]
+                ]);
+            return file_get_contents($url, false, $ctx);
+        }
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        $result = curl_exec($ch);
+        curl_close($ch);
+
+        return $result;
+    }
+
+    /**
      * Downloads fresh keys from the OIDC provider URL $iss.
      * Returns an array of keys or FALSE
      */
-    private static function downloadKeysFromIssuer($iss)
+    private function downloadKeysFromIssuer($iss)
     {
         if ($iss == "") {
             return false;
         }
 
-		$url = "$iss/.well-known/openid-configuration";
-		$oidc_conf = file_get_contents($url);
+        $url = "$iss/.well-known/openid-configuration";
+
+        // download openid-configuration from the issuer with retries
+        $sleep = 1;
+        $oidc_conf = false;
+        for ($i=0; $i<3; $i++) {
+            if (self::JWKS_CACHE_TTL > 0) {
+                $keys = $this->loadFromCache($iss);
+                // check the cache is still invalid before starting the fetch
+                if ($keys !== false) {
+                    return $keys;
+                }
+            }
+
+            $oidc_conf = self::fetchFromURL($url, 2);
+            if ($oidc_conf !== false) {
+                break;
+            }
+
+            sleep($sleep);
+            $sleep *= 2;
+        }
+
 		if ($oidc_conf === false) {
 			self::fail("OIDC configuration at $url unreachable");
 			return false;
@@ -190,20 +235,39 @@ class JWTAuthVerifier
 			return false;
 		}
 
-		$keys = file_get_contents($jwks_uri);
-		if ($keys === false) {
+        // download jwks_uri content with retries
+        $sleep = 1;
+        $jwks_uri_content = false;
+        for ($i=0; $i<3; $i++) {
+            if (self::JWKS_CACHE_TTL > 0) {
+                $keys = $this->loadFromCache($iss);
+                // check the cache is still invalid before starting the fetch
+                if ($keys !== false) {
+                    return $keys;
+                }
+            }
+
+            $jwks_uri_content = self::fetchFromURL($jwks_uri, 2);
+            if ($jwks_uri_content !== false) {
+                break;
+            }
+
+            sleep($sleep);
+            $sleep *= 2;
+        }
+		if ($jwks_uri_content === false) {
 			self::fail("JWKS URI $jwks_uri unreachable");
 			return false;
 		}
 
-		$keys = json_decode($keys, true);
+		$keys = json_decode($jwks_uri_content, true);
 		if ($keys === false) {
 			self::fail("JWKS URI $jwks_uri invalid");
 			return false;
 		}
 
 		$keys = $keys["keys"];
-		if ($keys === false) {
+		if ($keys === false || !isset($keys)) {
 			self::fail("JWKS URI $jwks_uri doesn't specify keys");
 			return false;
 		}
@@ -352,7 +416,7 @@ class JWTAuthVerifier
         }
 
         // download fresh keys
-        $keys = self::downloadKeysFromIssuer($iss);
+        $keys = $this->downloadKeysFromIssuer($iss);
         if ($keys === false) {
             return false;
         }
