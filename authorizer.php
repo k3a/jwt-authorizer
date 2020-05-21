@@ -387,8 +387,17 @@ class JWTAuthVerifier
         // pre-pend iv, tag length and tag in front of data
         $data = $iv . chr(strlen($tag)) . $tag . $data;
 
+        $tmpCachePath = tempnam(sys_get_temp_dir(), '');
         $cachePath = $this->cachePathForIssuer($iss);
-        return file_put_contents($cachePath, $data) !== false;
+
+        // avoid invalid (unfinished) files by writing to a temporary file first
+        if (file_put_contents($tmpCachePath, $data) === false) {
+            // unable to write to a temporary file
+            return false;
+        }
+
+        // move to the destination
+        return rename($tmpCachePath, $cachePath);
     }
 
     /**
