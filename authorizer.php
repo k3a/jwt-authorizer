@@ -15,6 +15,7 @@ Some parts based on https://github.com/okta/okta-jwt-verifier-php (Apache 2.0)
 */
 
 require __DIR__ . '/vendor/autoload.php';
+require __DIR__ . '/getallheaders.php';
 
 use Lcobucci\JWT\Parser;
 use Lcobucci\Jose\Parsing;
