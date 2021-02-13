@@ -4,7 +4,7 @@
 require('./authorizer.php');
 
 //echo "oik";
-print_r(getallheaders());
+//print_r(getallheaders());
 
 //htmlspecialchars($_COOKIE["name"])
 
