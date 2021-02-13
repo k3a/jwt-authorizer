@@ -79,7 +79,7 @@ class JWTAuthVerifier
 						// looks like bearer token, stop here and return the second part
 						$jwtInput = $varr[1];
 						break;
-					} else if ($bearerToken == "") {
+					} else if (!isset($jwtInput)) {
 						// our best bet so far...
 						$jwtInput = $varr[0];
 					}
@@ -282,17 +282,27 @@ class JWTAuthVerifier
      */
     private static function getPemKeyFromKeys($kid, $keys) 
     {
+        $unsupportedType = "";
+
 		foreach ($keys as $k) {
 			if ($k["kid"] == $kid) {
 				$kty = $k["kty"];
 				if ($kty == "RSA") {
+                    // supported type => return now
 					return self::createPemFromModulusAndExponent($k["n"], $k["e"]);
-				} else {
-					self::fail("JWKS URI $jwks_uri provides unsupported key type $kty for key $kid");
-					return false;
+				} else if ($unsupportedType == "") {
+                    // remember the first unsupported type
+                    $unsupportedType = $kty;
 				}
 			}
         }
+
+        if ($unsupportedType != "") {
+            // failure due to unsupported key type
+            self::fail("JWKS provider provides unsupported key type $unsupportedType for key $kid");
+        }
+
+        // other kind of failure
         return false;
     }
 
