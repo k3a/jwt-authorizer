@@ -6,6 +6,12 @@ namespace Composer\Autoload;
 
 class ComposerStaticInit0d0b9be5e6df5f95c3bfd1c1d7885be1
 {
+    public static $files = array (
+        '256c1545158fc915c75e51a931bdba60' => __DIR__ . '/..' . '/lcobucci/jwt/compat/class-aliases.php',
+        '0d273777b2b0d96e49fb3d800c6b0e81' => __DIR__ . '/..' . '/lcobucci/jwt/compat/json-exception-polyfill.php',
+        'd6b246ac924292702635bb2349f4a64b' => __DIR__ . '/..' . '/lcobucci/jwt/compat/lcobucci-clock-polyfill.php',
+    );
+
     public static $prefixLengthsPsr4 = array (
         'L' => 
         array (
@@ -20,11 +26,16 @@ class ComposerStaticInit0d0b9be5e6df5f95c3bfd1c1d7885be1
         ),
     );
 
+    public static $classMap = array (
+        'Composer\\InstalledVersions' => __DIR__ . '/..' . '/composer/InstalledVersions.php',
+    );
+
     public static function getInitializer(ClassLoader $loader)
     {
         return \Closure::bind(function () use ($loader) {
             $loader->prefixLengthsPsr4 = ComposerStaticInit0d0b9be5e6df5f95c3bfd1c1d7885be1::$prefixLengthsPsr4;
             $loader->prefixDirsPsr4 = ComposerStaticInit0d0b9be5e6df5f95c3bfd1c1d7885be1::$prefixDirsPsr4;
+            $loader->classMap = ComposerStaticInit0d0b9be5e6df5f95c3bfd1c1d7885be1::$classMap;
 
         }, null, ClassLoader::class);
     }

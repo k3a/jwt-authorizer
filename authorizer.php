@@ -118,7 +118,7 @@ class JWTAuthVerifier
 	 */
 	public function hasToken()
 	{
-		return $this->token != null && $this->token !== false;
+		return isset($this->token) && $this->token !== false;
 	}
 
     /**
