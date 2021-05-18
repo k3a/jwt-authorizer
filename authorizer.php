@@ -100,7 +100,12 @@ class JWTAuthVerifier
             }
 
             $cookieUserName = isset($_COOKIE[self::USER_NAME_COOKIE]) ? trim($_COOKIE[self::USER_NAME_COOKIE], '"') : "";
-            $this->email = $this->token->getClaim("email");
+
+            try {
+                $this->email = $this->token->getClaim("email");
+            } catch (Exception $e) {
+                $this->email = "";
+            }
 
 			if ($cookieUserName != "") {
 				$this->userName = $cookieUserName;
@@ -476,7 +481,12 @@ class JWTAuthVerifier
 			return true;
 		}
 
-        $iss = $this->token->getClaim("iss");
+        try {
+            $iss = $this->token->getClaim("iss");
+        } catch (Exception $e) {
+            $iss = "";
+        }
+
         if (is_null($iss) || $iss == "") {
             self::fail("no iss (issuer) claim in the token");
             return false;
@@ -551,7 +561,12 @@ class JWTAuthVerifier
             return false;
         }
 
-        $groups = $this->token->getClaim("groups");
+        try {
+            $groups = $this->token->getClaim("groups");
+        } catch (Exception $e) {
+            $groups = [];
+        }
+
         if (is_null($groups) || !is_array($groups)) {
             self::fail("groups claim is not an array");
             return false;
