@@ -17,10 +17,13 @@ Some parts based on https://github.com/okta/okta-jwt-verifier-php (Apache 2.0)
 require __DIR__ . '/vendor/autoload.php';
 require __DIR__ . '/getallheaders.php';
 
-use Lcobucci\JWT\Parser;
-use Lcobucci\Jose\Parsing;
-use Lcobucci\JWT\Signer\Key;
+use Lcobucci\JWT\Token\Parser;
+use Lcobucci\JWT\Encoding\JoseEncoder;
+use Lcobucci\JWT\UnencryptedToken;
+use Lcobucci\JWT\Signer\Key\InMemory;
 use Lcobucci\JWT\Signer\Rsa\Sha256;
+use Lcobucci\JWT\Validation\Constraint\SignedWith;
+use Lcobucci\JWT\Validation\Validator;
 
 class JWTAuthVerifier
 {
@@ -32,13 +35,17 @@ class JWTAuthVerifier
 
     private $allowedIssuerDomains;
     private $cacheKey = null;
-	private $tokenVerified = false;
-	private $groups = null;
+    private $tokenVerified = false;
+    private $groups = null;
+    private ?UnencryptedToken $token = null;
 
-	public $userName = "Unknown";
+    /** @readonly */
+    public $email = '';
+    /** @readonly */
+    public $userName = 'Unknown';
 
     private static function fail($str)
-	{
+    {
         die("Authentication failed: $str");
     }
 
@@ -48,17 +55,14 @@ class JWTAuthVerifier
      * @param string $cacheKey key used for encryption of JWKS cache
      * @param string $jwtInput (optional) JWT input string to verify (will use Authentication header if not provided)
      */
-    public function __construct($allowedIssuerDomains, $cacheKey, $jwtInput = null)
+    public function __construct($allowedIssuerDomains, $cacheKey, $jwtInput = '')
     {
         $this->allowedIssuerDomains = $allowedIssuerDomains;
-
-        if (self::JWKS_CACHE_TTL > 0) {
-            if (!isset($cacheKey) || $cacheKey == "") {
-                self::fail("cacheKey must be set");
-                return;
-            }
-            //$this->cacheKey = substr(hash("sha256", $cacheKey), 0, self::JWKS_KEY_LEN_BITS/8);
+        if (!isset($cacheKey) || $cacheKey == "") {
+            self::fail("cacheKey must be set");
+            return;
         }
+        $this->cacheKey = $cacheKey;
 
         if (!isset($jwtInput) || strlen($jwtInput) == 0) {
             $heads = getallheaders();
@@ -68,63 +72,65 @@ class JWTAuthVerifier
             }
 
             // attempt to extract JWT from Authorization header
-            foreach($heads as $h => $v) {
+            foreach ($heads as $h => $v) {
                 if (strcasecmp($h, self::TOKEN_HEADER_NAME) == 0) {
-					$varr = explode(" ", $v);
-					if (count($varr) == 0) {
-						// empty array of space-separated items, skip
-						continue;
-					}
-					if (count($varr) == 2 && strcasecmp($varr[0], "Bearer") == 0) {
-						// looks like bearer token, stop here and return the second part
-						$jwtInput = $varr[1];
-						break;
-					} else if (!isset($jwtInput)) {
-						// our best bet so far...
-						$jwtInput = $varr[0];
-					}
+                    $varr = explode(" ", $v);
+                    if (count($varr) == 0) {
+                        // empty array of space-separated items, skip
+                        continue;
+                    }
+                    if (count($varr) == 2 && strcasecmp($varr[0], "Bearer") == 0) {
+                        // looks like bearer token, stop here and return the second part
+                        $jwtInput = $varr[1];
+                        break;
+                    } else if (!isset($jwtInput)) {
+                        // our best bet so far...
+                        $jwtInput = $varr[0];
+                    }
                 }
             }
         }
 
         if (strlen($jwtInput) > 0) {
             try {
-                $this->token = (new Parser())->parse($jwtInput);
+                $this->token = (new Parser(new JoseEncoder()))->parse($jwtInput);
                 if ($this->token === false) {
                     self::fail("unable to parse token");
                     return;
                 }
-            } catch(Exception $e) {
+            } catch (Exception $e) {
                 $this->token = null;
                 return;
             }
 
+            assert($this->token instanceof UnencryptedToken);
+
             $cookieUserName = isset($_COOKIE[self::USER_NAME_COOKIE]) ? trim($_COOKIE[self::USER_NAME_COOKIE], '"') : "";
 
             try {
-                $this->email = $this->token->getClaim("email");
+                $this->email = $this->token->claims()->get("email");
             } catch (Exception $e) {
                 $this->email = "";
             }
 
-			if ($cookieUserName != "") {
-				$this->userName = $cookieUserName;
-			} else {
-				if (!is_null($this->email) && $this->email != "") {
-					$this->userName = $this->email;
-				}
-			}
-		}
+            if ($cookieUserName != "") {
+                $this->userName = $cookieUserName;
+            } else {
+                if (!is_null($this->email) && $this->email != "") {
+                    $this->userName = $this->email;
+                }
+            }
+        }
     }
 
-	/**
-	 * Returns a boolean indicating whether a bearer token was provided.
-	 * CAUTION: This does not check the validity of the token, use verify() for that!
-	 */
-	public function hasToken()
-	{
-		return isset($this->token) && $this->token !== false;
-	}
+    /**
+     * Returns a boolean indicating whether a bearer token was provided.
+     * CAUTION: This does not check the validity of the token, use verify() for that!
+     */
+    public function hasToken()
+    {
+        return isset($this->token) && $this->token !== false;
+    }
 
     /**
      * Case-insensitive comparison of group names with special handling of email group format as follows:
@@ -173,10 +179,11 @@ class JWTAuthVerifier
     private static function fetchFromURL($url, $timeout = 10)
     {
         if (!in_array('curl', get_loaded_extensions())) {
-            $ctx = stream_context_create(['http'=> [
-                        'timeout' => $timeout,
-                    ]
-                ]);
+            $ctx = stream_context_create([
+                'http' => [
+                    'timeout' => $timeout,
+                ]
+            ]);
             return file_get_contents($url, false, $ctx);
         }
 
@@ -206,7 +213,7 @@ class JWTAuthVerifier
         // download openid-configuration from the issuer with retries
         $sleep = 1;
         $oidc_conf = false;
-        for ($i=0; $i<3; $i++) {
+        for ($i = 0; $i < 3; $i++) {
             if (self::JWKS_CACHE_TTL > 0) {
                 $keys = $this->loadFromCache($iss);
                 // check the cache is still invalid before starting the fetch
@@ -224,27 +231,27 @@ class JWTAuthVerifier
             $sleep *= 2;
         }
 
-		if ($oidc_conf === false) {
-			self::fail("OIDC configuration at $url unreachable");
-			return false;
-		}
+        if ($oidc_conf === false) {
+            self::fail("OIDC configuration at $url unreachable");
+            return false;
+        }
 
-		$oidc_conf = json_decode($oidc_conf, true);
-		if ($oidc_conf === false) {
-			self::fail("OIDC configuration at $url invalid");
-			return false;
-		}
+        $oidc_conf = json_decode($oidc_conf, true);
+        if ($oidc_conf === false) {
+            self::fail("OIDC configuration at $url invalid");
+            return false;
+        }
 
-		$jwks_uri = $oidc_conf["jwks_uri"];
-		if (is_null($jwks_uri) || $jwks_uri == "") {
-			self::fail("OIDC configuration at $url doesn't specify jwks_uri");
-			return false;
-		}
+        $jwks_uri = $oidc_conf["jwks_uri"];
+        if (is_null($jwks_uri) || $jwks_uri == "") {
+            self::fail("OIDC configuration at $url doesn't specify jwks_uri");
+            return false;
+        }
 
         // download jwks_uri content with retries
         $sleep = 1;
         $jwks_uri_content = false;
-        for ($i=0; $i<3; $i++) {
+        for ($i = 0; $i < 3; $i++) {
             if (self::JWKS_CACHE_TTL > 0) {
                 $keys = $this->loadFromCache($iss);
                 // check the cache is still invalid before starting the fetch
@@ -261,22 +268,22 @@ class JWTAuthVerifier
             sleep($sleep);
             $sleep *= 2;
         }
-		if ($jwks_uri_content === false) {
-			self::fail("JWKS URI $jwks_uri unreachable");
-			return false;
-		}
+        if ($jwks_uri_content === false) {
+            self::fail("JWKS URI $jwks_uri unreachable");
+            return false;
+        }
 
-		$keys = json_decode($jwks_uri_content, true);
-		if ($keys === false) {
-			self::fail("JWKS URI $jwks_uri invalid");
-			return false;
-		}
+        $keys = json_decode($jwks_uri_content, true);
+        if ($keys === false) {
+            self::fail("JWKS URI $jwks_uri invalid");
+            return false;
+        }
 
-		$keys = $keys["keys"];
-		if ($keys === false || !isset($keys)) {
-			self::fail("JWKS URI $jwks_uri doesn't specify keys");
-			return false;
-		}
+        $keys = $keys["keys"];
+        if ($keys === false || !isset($keys)) {
+            self::fail("JWKS URI $jwks_uri doesn't specify keys");
+            return false;
+        }
 
         return $keys;
     }
@@ -285,21 +292,21 @@ class JWTAuthVerifier
      * Attempts to find $kid in the list of keys and returns it's PEM representation 
      * Returns FALSE if the supported key was not found or conversion to PEM failed
      */
-    private static function getPemKeyFromKeys($kid, $keys) 
+    private static function getPemKeyFromKeys($kid, $keys)
     {
         $unsupportedType = "";
 
-		foreach ($keys as $k) {
-			if ($k["kid"] == $kid) {
-				$kty = $k["kty"];
-				if ($kty == "RSA") {
+        foreach ($keys as $k) {
+            if ($k["kid"] == $kid) {
+                $kty = $k["kty"];
+                if ($kty == "RSA") {
                     // supported type => return now
-					return self::createPemFromModulusAndExponent($k["n"], $k["e"]);
-				} else if ($unsupportedType == "") {
+                    return self::createPemFromModulusAndExponent($k["n"], $k["e"]);
+                } else if ($unsupportedType == "") {
                     // remember the first unsupported type
                     $unsupportedType = $kty;
-				}
-			}
+                }
+            }
         }
 
         if ($unsupportedType != "") {
@@ -323,7 +330,8 @@ class JWTAuthVerifier
      * Attempts to load cached issuer object from the cache.
      * Returns FALSE if the cache does not exist or is invalid. 
      */
-    private function loadFromCache($iss) {
+    private function loadFromCache($iss)
+    {
         $cachePath = $this->cachePathForIssuer($iss);
 
         if (!file_exists($cachePath)) {
@@ -458,16 +466,16 @@ class JWTAuthVerifier
                 "keys" => $keys,
                 "ts" => time(),
             ];
-            
+
             $this->storeToCache($iss, $obj);
         }
-        
+
         return $pem;
     }
 
-	/**
-	 * Verifies a valid token has been provided, signed with a whitelisted issuer
-	 */
+    /**
+     * Verifies a valid token has been provided, signed with a whitelisted issuer
+     */
     public function verify()
     {
         // check we have a token first
@@ -476,18 +484,14 @@ class JWTAuthVerifier
             return false;
         }
 
-		// already verified?
-		if ($this->tokenVerified) {
-			return true;
-		}
-
-        try {
-            $iss = $this->token->getClaim("iss");
-        } catch (Exception $e) {
-            $iss = "";
+        // already verified?
+        if ($this->tokenVerified) {
+            return true;
         }
 
-        if (is_null($iss) || $iss == "") {
+        $iss = $this->token->claims()->get("iss", "");
+
+        if ($iss == "") {
             self::fail("no iss (issuer) claim in the token");
             return false;
         }
@@ -500,29 +504,32 @@ class JWTAuthVerifier
                 self::fail("iss claim (issuer) is not valid URL: $iss");
                 return;
             }
-            
+
             $issDomain = $u["host"];
+        } else {
+            self::fail("iss claim (issuer) is an URL: $iss");
+            return;
         }
 
         // ensure the issuer is whitelisted
-        if (!isset($issDomain) || $issDomain=="" || !in_array($u["host"], $this->allowedIssuerDomains)) {
+        if (!isset($issDomain) || $issDomain == "" || !in_array($u["host"], $this->allowedIssuerDomains)) {
             self::fail("issuer domain $issDomain is not allowed");
             return;
         }
 
-        $headers = $this->token->getHeaders();
+        $headers = $this->token->headers();
         if (is_null($headers)) {
             self::fail("no headers provided in the parsed token");
             return false;
         }
 
-        $alg = $headers["alg"];
+        $alg = $headers->get("alg");
         if (is_null($alg) || $alg == "") {
             self::fail("no alg in the token header");
             return false;
         }
 
-        $kid = $headers["kid"];
+        $kid = $headers->get("kid");
         if (is_null($kid) || $kid == "") {
             self::fail("no kid in the token header");
             return false;
@@ -543,26 +550,34 @@ class JWTAuthVerifier
             return false;
         }
 
-        $this->tokenVerified = $this->token->verify($signer, new Key($pemPublicKey));
+        $validator = new Validator();
+        try {
+            $validator->assert($this->token, new SignedWith($signer, InMemory::plainText($pemPublicKey)));
+        } catch (Exception $e) {
+            self::fail("token signature validation failed");
+            return false;
+        }
 
-		return $this->tokenVerified;
+        $this->tokenVerified = true;
+
+        return $this->tokenVerified;
     }
 
-	/**
-	 * getGroups validates the token and extracts group
-	 */
-	public function getGroups()
-	{
-		if (!is_null($this->groups)) {
-			return $this->groups;
-		}
+    /**
+     * getGroups validates the token and extracts group
+     */
+    public function getGroups()
+    {
+        if (!is_null($this->groups)) {
+            return $this->groups;
+        }
 
         if (!$this->verify()) {
             return false;
         }
 
         try {
-            $groups = $this->token->getClaim("groups");
+            $groups = $this->token->claims()->get("groups");
         } catch (Exception $e) {
             $groups = [];
         }
@@ -572,70 +587,70 @@ class JWTAuthVerifier
             return false;
         }
 
-		$this->groups = $groups;
-		return $this->groups;
-	}
+        $this->groups = $groups;
+        return $this->groups;
+    }
 
-	/**
-	  * Maps user groups from the token to the array of new groups using the mapping dict mapDict.
-	  * Keys in mapDict can be groups names, emails or email part before '@'.
-	  * mapDict can be null, in which case all groups are used.
-	  * If stripDomains is true, character '@' and following are stripped from the final group names.
-	  */
-	public function mapGroups($mapDict = null, $stripDomains = false) 
-	{
+    /**
+     * Maps user groups from the token to the array of new groups using the mapping dict mapDict.
+     * Keys in mapDict can be groups names, emails or email part before '@'.
+     * mapDict can be null, in which case all groups are used.
+     * If stripDomains is true, character '@' and following are stripped from the final group names.
+     */
+    public function mapGroups($mapDict = null, $stripDomains = false)
+    {
         $groups = $this->getGroups();
         if ($groups === false) {
             return false;
         }
 
-		$finalGroups = [];
-		foreach($groups as $grp) {
-			$key = "";
-			if (is_null($mapDict)) {
-				// use key directly
-				$key = $grp;
-			} else {
-				// use the value of the mapDict if the key matches
-				foreach($mapDict as $mdk => $mdv) {
-					if (self::groupNamesEqual($grp, $mdk)) {
-						$key = $mdv;
-					}
-				}
-			}
+        $finalGroups = [];
+        foreach ($groups as $grp) {
+            $key = "";
+            if (is_null($mapDict)) {
+                // use key directly
+                $key = $grp;
+            } else {
+                // use the value of the mapDict if the key matches
+                foreach ($mapDict as $mdk => $mdv) {
+                    if (self::groupNamesEqual($grp, $mdk)) {
+                        $key = $mdv;
+                    }
+                }
+            }
 
-			// this key should not be emitted
-			if ($key == "") {
-				continue;
-			}
+            // this key should not be emitted
+            if ($key == "") {
+                continue;
+            }
 
-			// stip domain part if asked
-			if ($stripDomains) {
-				$arr = explode("@", $key);
-				$key = $arr[0];
-			}
+            // stip domain part if asked
+            if ($stripDomains) {
+                $arr = explode("@", $key);
+                $key = $arr[0];
+            }
 
-			$finalGroups[] = $key;
-		}
+            $finalGroups[] = $key;
+        }
 
-		return $finalGroups;
-	}
+        return $finalGroups;
+    }
 
-	/**
-	 * Verifies a valid token has been provided, signed with a whitelisted issuer and containing the provided group name
-	 */
+    /**
+     * Verifies a valid token has been provided, signed with a whitelisted issuer and containing the provided group name
+     */
     public function verifyGroup($groupName)
     {
-		if (!$this->verify()) {
-			return false;
-		}
+        if (!$this->verify()) {
+            return false;
+        }
 
-		$groups = $this->getGroups();
-		if ($groups === false) {
-			return false;
-		}
+        $groups = $this->getGroups();
+        if ($groups === false) {
+            return false;
+        }
 
-        foreach($groups as $grp) {
+        foreach ($groups as $grp) {
             if (self::groupNamesEqual($grp, $groupName)) {
                 return true;
             }
@@ -674,11 +689,11 @@ class JWTAuthVerifier
      */
     private static function createPemFromModulusAndExponent($n, $e)
     {
-		if (is_null($n) || is_null($e) || $n == "" || $e == "") {
-			return false;
-		}
+        if (is_null($n) || is_null($e) || $n == "" || $e == "") {
+            return false;
+        }
 
-		$decoder = new \Lcobucci\JWT\Parsing\Decoder();
+        $decoder = new JoseEncoder();
 
         $modulus = $decoder->base64UrlDecode($n);
         $publicExponent = $decoder->base64UrlDecode($e);

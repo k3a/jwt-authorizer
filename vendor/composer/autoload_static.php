@@ -6,13 +6,11 @@ namespace Composer\Autoload;
 
 class ComposerStaticInit0d0b9be5e6df5f95c3bfd1c1d7885be1
 {
-    public static $files = array (
-        '256c1545158fc915c75e51a931bdba60' => __DIR__ . '/..' . '/lcobucci/jwt/compat/class-aliases.php',
-        '0d273777b2b0d96e49fb3d800c6b0e81' => __DIR__ . '/..' . '/lcobucci/jwt/compat/json-exception-polyfill.php',
-        'd6b246ac924292702635bb2349f4a64b' => __DIR__ . '/..' . '/lcobucci/jwt/compat/lcobucci-clock-polyfill.php',
-    );
-
     public static $prefixLengthsPsr4 = array (
+        'P' => 
+        array (
+            'Psr\\Clock\\' => 10,
+        ),
         'L' => 
         array (
             'Lcobucci\\JWT\\' => 13,
@@ -20,6 +18,10 @@ class ComposerStaticInit0d0b9be5e6df5f95c3bfd1c1d7885be1
     );
 
     public static $prefixDirsPsr4 = array (
+        'Psr\\Clock\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/psr/clock/src',
+        ),
         'Lcobucci\\JWT\\' => 
         array (
             0 => __DIR__ . '/..' . '/lcobucci/jwt/src',
