@@ -23,7 +23,7 @@ use Lcobucci\JWT\UnencryptedToken;
 use Lcobucci\JWT\Signer\Key\InMemory;
 use Lcobucci\JWT\Signer\Rsa\Sha256;
 use Lcobucci\JWT\Validation\Constraint\SignedWith;
-use Lcobucci\JWT\Validation\Constraint\StrictValidAt;
+use Lcobucci\JWT\Validation\Constraint\LooseValidAt;
 use Lcobucci\JWT\Validation\Constraint\PermittedFor;
 use Psr\Clock\ClockInterface;
 use Lcobucci\JWT\Validation\Validator;
@@ -596,8 +596,8 @@ class JWTAuthVerifier
             $validator->assert(
                 $this->token,
                 new SignedWith($signer, InMemory::plainText($pemPublicKey)),
-                // requires exp, and checks exp/nbf/iat
-                new StrictValidAt(new JWTAuthSystemClock(), new DateInterval('PT' . self::CLOCK_LEEWAY_SECONDS . 'S')),
+                // checks exp/nbf/iat when present (Dex tokens carry no nbf)
+                new LooseValidAt(new JWTAuthSystemClock(), new DateInterval('PT' . self::CLOCK_LEEWAY_SECONDS . 'S')),
                 new PermittedFor($this->audience)
             );
         } catch (Exception $e) {
