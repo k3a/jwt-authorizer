@@ -23,7 +23,19 @@ use Lcobucci\JWT\UnencryptedToken;
 use Lcobucci\JWT\Signer\Key\InMemory;
 use Lcobucci\JWT\Signer\Rsa\Sha256;
 use Lcobucci\JWT\Validation\Constraint\SignedWith;
+use Lcobucci\JWT\Validation\Constraint\StrictValidAt;
+use Lcobucci\JWT\Validation\Constraint\PermittedFor;
+use Psr\Clock\ClockInterface;
 use Lcobucci\JWT\Validation\Validator;
+
+/** Minimal PSR-20 system clock */
+final class JWTAuthSystemClock implements ClockInterface
+{
+    public function now(): DateTimeImmutable
+    {
+        return new DateTimeImmutable('now', new DateTimeZone('UTC'));
+    }
+}
 
 class JWTAuthVerifier
 {
@@ -32,9 +44,11 @@ class JWTAuthVerifier
     const JWKS_CACHE_TTL = 60; // JWKS cache time-to-live (0 to disable)
     const JWKS_CACHE_ENC_ALG = "aes-128-gcm"; // encryption alg for cache
     const JWKS_KEY_LEN_BITS = 128;
+    const CLOCK_LEEWAY_SECONDS = 60; // tolerated clock skew for exp/nbf/iat
 
     private $allowedIssuerDomains;
     private $cacheKey = null;
+    private $audience = null;
     private $tokenVerified = false;
     private $groups = null;
     private ?UnencryptedToken $token = null;
@@ -54,10 +68,16 @@ class JWTAuthVerifier
      * @param array $allowedIssuers list of allowed issuer domains (domain part of iss claim), e.g. auth.domain.com
      * @param string $cacheKey key used for encryption of JWKS cache
      * @param string $jwtInput (optional) JWT input string to verify (will use Authentication header if not provided)
+     * @param string $audience required value the token's aud claim must contain (e.g. traefik_forward_auth)
      */
-    public function __construct($allowedIssuerDomains, $cacheKey, $jwtInput = '')
+    public function __construct($allowedIssuerDomains, $cacheKey, $jwtInput = '', $audience = '')
     {
         $this->allowedIssuerDomains = $allowedIssuerDomains;
+        if (!is_string($audience) || $audience === "") {
+            self::fail("audience must be set");
+            return;
+        }
+        $this->audience = $audience;
         if (!isset($cacheKey) || $cacheKey == "") {
             self::fail("cacheKey must be set");
             return;
@@ -552,9 +572,15 @@ class JWTAuthVerifier
 
         $validator = new Validator();
         try {
-            $validator->assert($this->token, new SignedWith($signer, InMemory::plainText($pemPublicKey)));
+            $validator->assert(
+                $this->token,
+                new SignedWith($signer, InMemory::plainText($pemPublicKey)),
+                // requires exp, and checks exp/nbf/iat
+                new StrictValidAt(new JWTAuthSystemClock(), new DateInterval('PT' . self::CLOCK_LEEWAY_SECONDS . 'S')),
+                new PermittedFor($this->audience)
+            );
         } catch (Exception $e) {
-            self::fail("token signature validation failed");
+            self::fail("token validation failed (signature, expiry or audience)");
             return false;
         }
 
