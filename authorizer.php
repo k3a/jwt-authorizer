@@ -64,7 +64,7 @@ class JWTAuthVerifier
 
     /**
      * Constructor
-     * @param array $allowedIssuers list of allowed issuer domains (domain part of iss claim), e.g. auth.domain.com
+     * @param array $allowedIssuerDomains allowed issuers: full https issuer URLs (exact match, e.g. https://auth.domain.com/tenant) or bare hosts (e.g. auth.domain.com, matching only https://auth.domain.com)
      * @param string $cacheKey key used for encryption of JWKS cache
      * @param string $jwtInput (optional) JWT input string to verify (will use Authentication header if not provided)
      * @param string $audience required value the token's aud claim must contain (e.g. traefik_forward_auth)
@@ -495,6 +495,41 @@ class JWTAuthVerifier
     }
 
     /**
+     * Exact-match issuer allowlist check. Each allowlist entry is either
+     *  - a full issuer URL (https://host[:port][/path]), compared exactly (a trailing "/" is ignored), or
+     *  - a bare host name, which only permits the issuer https://host (no port, path, query or userinfo).
+     * The scheme must be https.
+     */
+    private static function isIssuerAllowed($iss, $allowed)
+    {
+        if (!is_array($allowed) || preg_match('/[\x00-\x20\x7f\\\\]/', $iss)) {
+            return false;
+        }
+        $u = parse_url($iss);
+        if ($u === false || ($u["scheme"] ?? "") !== "https" || ($u["host"] ?? "") === ""
+            || isset($u["user"]) || isset($u["pass"]) || isset($u["query"]) || isset($u["fragment"])
+            || strpos($iss, "?") !== false || strpos($iss, "#") !== false) {
+            return false;
+        }
+        $issNorm = rtrim($iss, "/");
+        foreach ($allowed as $entry) {
+            if (!is_string($entry) || $entry === "") {
+                continue;
+            }
+            if (strpos($entry, "://") !== false) {
+                if ($issNorm === rtrim($entry, "/")) {
+                    return true;
+                }
+            } else if (!isset($u["port"]) && ($u["path"] ?? "") === "" || ($u["path"] ?? "") === "/") {
+                if (!isset($u["port"]) && strcasecmp($u["host"], $entry) === 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Verifies a valid token has been provided, signed with a whitelisted issuer
      */
     public function verify()
@@ -517,26 +552,11 @@ class JWTAuthVerifier
             return false;
         }
 
-        // parse domain part from the issuer
-        $issDomain = $iss;
-        if (substr($issDomain, 0, 4) == "http") {
-            $u = parse_url($iss);
-            if (is_null($u) || $u === false) {
-                self::fail("iss claim (issuer) is not valid URL: $iss");
-                return;
-            }
-
-            $issDomain = $u["host"];
-        } else {
-            self::fail("iss claim (issuer) is an URL: $iss");
-            return;
+        if (!is_string($iss) || !self::isIssuerAllowed($iss, $this->allowedIssuerDomains)) {
+            self::fail("issuer is not allowed");
+            return false;
         }
-
-        // ensure the issuer is whitelisted
-        if (!isset($issDomain) || $issDomain == "" || !in_array($u["host"], $this->allowedIssuerDomains)) {
-            self::fail("issuer domain $issDomain is not allowed");
-            return;
-        }
+        $iss = rtrim($iss, "/");
 
         $headers = $this->token->headers();
         if (is_null($headers)) {
