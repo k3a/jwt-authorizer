@@ -39,7 +39,6 @@ final class JWTAuthSystemClock implements ClockInterface
 
 class JWTAuthVerifier
 {
-    const USER_NAME_COOKIE = "_admin_auth_user_name";
     const TOKEN_HEADER_NAME = "Authorization";
     const JWKS_CACHE_TTL = 60; // JWKS cache time-to-live (0 to disable)
     const JWKS_CACHE_ENC_ALG = "aes-128-gcm"; // encryption alg for cache
@@ -125,20 +124,22 @@ class JWTAuthVerifier
 
             assert($this->token instanceof UnencryptedToken);
 
-            $cookieUserName = isset($_COOKIE[self::USER_NAME_COOKIE]) ? trim($_COOKIE[self::USER_NAME_COOKIE], '"') : "";
-
             try {
                 $this->email = $this->token->claims()->get("email");
             } catch (Exception $e) {
                 $this->email = "";
             }
 
-            if ($cookieUserName != "") {
-                $this->userName = $cookieUserName;
-            } else {
-                if (!is_null($this->email) && $this->email != "") {
-                    $this->userName = $this->email;
-                }
+            // userName: "name" claim, then email, else 'Unknown' (token claims only, never client cookies)
+            try {
+                $name = $this->token->claims()->get("name");
+            } catch (Exception $e) {
+                $name = null;
+            }
+            if (is_string($name) && trim($name) != "") {
+                $this->userName = trim($name);
+            } else if (is_string($this->email) && $this->email != "") {
+                $this->userName = $this->email;
             }
         }
     }
