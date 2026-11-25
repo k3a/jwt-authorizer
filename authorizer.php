@@ -57,8 +57,56 @@ class JWTAuthVerifier
     /** @readonly */
     public $userName = 'Unknown';
 
+    /**
+     * Logging is enabled by default. Disable it with any of:
+     *  - environment variable JWT_AUTHORIZER_LOG=0 (also: false, off, no)
+     *  - JWTAuthVerifier::$logEnabled = false; before constructing the verifier
+     * Messages go to PHP's error_log(). Never logs the token, signature, email, name, sub,
+     * groups or the query string of the request URI.
+     */
+    public static $logEnabled = true;
+
+    private static function logEnabled()
+    {
+        if (!self::$logEnabled) {
+            return false;
+        }
+        $env = getenv('JWT_AUTHORIZER_LOG');
+        if ($env !== false && in_array(strtolower(trim($env)), ['0', 'false', 'off', 'no'], true)) {
+            return false;
+        }
+        return true;
+    }
+
+    /** Makes an untrusted value safe for a single log line (no control chars, bounded length). */
+    private static function logSafe($v, $max = 200)
+    {
+        if (!is_string($v)) {
+            $v = json_encode($v, JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        }
+        $v = (string)preg_replace('/[^\x20-\x7e]/', '?', (string)$v);
+        return strlen($v) > $max ? substr($v, 0, $max) . '...' : $v;
+    }
+
+    private static function logDate($v)
+    {
+        return $v instanceof \DateTimeInterface ? $v->format('c') . ' (' . $v->getTimestamp() . ')' : self::logSafe($v);
+    }
+
+    private static function log($msg)
+    {
+        if (!self::logEnabled()) {
+            return;
+        }
+        $uri = parse_url($_SERVER['REQUEST_URI'] ?? '-', PHP_URL_PATH); // path only, query may hold secrets
+        error_log('jwt-authorizer: ' . $msg
+            . ' | uri=' . self::logSafe($uri === false || $uri === null ? '-' : $uri)
+            . ' ip=' . self::logSafe($_SERVER['REMOTE_ADDR'] ?? '-'));
+    }
+
     private static function fail($str)
     {
+        self::log("failed: " . self::logSafe($str, 500));
         die("Authentication failed: $str");
     }
 
@@ -600,7 +648,24 @@ class JWTAuthVerifier
                 new LooseValidAt(new JWTAuthSystemClock(), new DateInterval('PT' . self::CLOCK_LEEWAY_SECONDS . 'S')),
                 new PermittedFor($this->audience)
             );
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
+            $why = get_class($e) . ': ' . $e->getMessage();
+            if ($e instanceof \Lcobucci\JWT\Validation\RequiredConstraintsViolated) {
+                $why .= ' | violations: ' . implode(' ; ', array_map(function ($v) {
+                    return $v->getMessage();
+                }, $e->violations()));
+            }
+            $c = $this->token->claims();
+            self::log("validation failed: " . self::logSafe($why, 1000)
+                . " | now=" . gmdate('c') . " (" . time() . ")"
+                . " leeway=" . self::CLOCK_LEEWAY_SECONDS . "s"
+                . " | iss=" . self::logSafe($iss)
+                . " aud=" . self::logSafe($c->get('aud'))
+                . " expected_aud=" . self::logSafe($this->audience)
+                . " exp=" . self::logDate($c->get('exp'))
+                . " iat=" . self::logDate($c->get('iat'))
+                . " nbf=" . self::logDate($c->get('nbf'))
+                . " | alg=" . self::logSafe($alg) . " kid=" . self::logSafe($kid));
             self::fail("token validation failed (signature, expiry or audience)");
             return false;
         }
